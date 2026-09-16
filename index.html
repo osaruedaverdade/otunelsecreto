@@ -214,6 +214,18 @@
   </div>
 
   <script>
+    // CAMINHOS DOS ARQUIVOS DE ÁUDIO (.OGG)
+    const AUDIO_FILES = {
+      transito: 'transito.ogg',         // Zona A
+      eca: 'eca.ogg',                   // Zona B
+      crusp: 'crusp.ogg',               // Zona C
+      vento: 'vento.ogg',               // Zona D
+      bandejao: 'bandejao.ogg',         // Zona E
+      subterraneo: 'subterraneo.ogg',   // Zona F
+      queroQuero: 'quero_quero.ogg',    // Quero-Queros na Praça do Relógio
+      bateria: 'bateria.ogg'            // Bateria Universitária na Praça do Relógio
+    };
+
     const GRID_COLS = 18;
     const GRID_ROWS = 40;
     const CELL_SIZE = 2.4; 
@@ -265,15 +277,34 @@
     const startPos = { r: 26, c: 0 };
     const exitPos  = { r: 18, c: 17 };
 
-    // DEFINIÇÃO DAS ZONAS DO MAPA (CENTROS E NOMES)
+    // ZONAS DO MAPA COM SEUS RESPECTIVOS ARQUIVOS DE SOM
     const ZONES = {
-      A: { name: "A (Trânsito - Av. Melo Moraes)", centerR: 3, centerC: 9 },
-      B: { name: "B (ECA - Música/Artes)", centerR: 12, centerC: 4 },
-      C: { name: "C (CRUSP Sup - Residencial)", centerR: 12, centerC: 13 },
-      D: { name: "D (Reitoria - Vento/Entrada)", centerR: 25, centerC: 4 },
-      E: { name: "E (Bandejão - Canos/Pratos)", centerR: 25, centerC: 13 },
-      F: { name: "F (Gualberto - Subterrâneo Profundo)", centerR: 36, centerC: 9 }
+      A: { name: "A (Trânsito - Av. Melo Moraes)", centerR: 3, centerC: 9, audioKey: 'transito' },
+      B: { name: "B (ECA - Música/Artes)", centerR: 12, centerC: 4, audioKey: 'eca' },
+      C: { name: "C (CRUSP Sup - Residencial)", centerR: 12, centerC: 13, audioKey: 'crusp' },
+      D: { name: "D (Reitoria - Vento/Entrada)", centerR: 25, centerC: 4, audioKey: 'vento' },
+      E: { name: "E (Bandejão - Canos/Pratos)", centerR: 25, centerC: 13, audioKey: 'bandejao' },
+      F: { name: "F (Gualberto - Subterrâneo Profundo)", centerR: 36, centerC: 9, audioKey: 'subterraneo' }
     };
+
+    // PONTOS ESPECÍFICOS DOS QUERO-QUEROS NA PRAÇA DO RELÓGIO (ZONA D)
+    const QUERO_QUERO_SPOTS = [
+      { r: 23, c: 3 },
+      { r: 25, c: 1 },
+      { r: 27, c: 5 },
+      { r: 24, c: 7 }
+    ];
+
+    // PONTOS ESPECÍFICOS DA BATERIA UNIVERSITÁRIA NA PRAÇA DO RELÓGIO (ZONA D)
+    const BATERIA_SPOTS = [
+      { r: 24, c: 4 },
+      { r: 26, c: 3 },
+      { r: 27, c: 5 },
+      { r: 25, c: 2 },
+            { r: 25, c: 3 },
+                        { r: 25, c: 4 },
+                                    { r: 25, c: 5 }
+    ];
 
     let playerPos = { x: 0, z: 0 };
     let playerAngle = -Math.PI / 2;
@@ -283,10 +314,13 @@
     const inputState = { forward: false, backward: false, turnLeft: false, turnRight: false };
     let scene, camera, renderer, torchLight, clock;
     let flickeringLights = [], dustParticles;
-    let audioCtx = null;
-    let zoneGains = {};
 
-    // TEXTURA PAREDE
+    // GERENCIAMENTO DE ÁUDIO WEB AUDIO API
+    let audioCtx = null;
+    let audioBuffers = {};
+    let audioGains = {};
+    let audioSources = {};
+
     function createWallTexture() {
       const canvas = document.createElement('canvas');
       canvas.width = 512; canvas.height = 512;
@@ -321,7 +355,6 @@
       return texture;
     }
 
-    // TEXTURA CHÃO DE CONCRETO
     function createFloorTexture() {
       const canvas = document.createElement('canvas');
       canvas.width = 512; canvas.height = 512;
@@ -359,91 +392,51 @@
       return texture;
     }
 
-    // CRIADOR DE RUÍDO EM BUFFER
-    function createNoiseBuffer() {
-      const bufferSize = audioCtx.sampleRate * 2;
-      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-      const output = buffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) {
-        output[i] = Math.random() * 2 - 1;
+    // CARREGADOR DE ÁUDIO .OGG
+    async function loadAudioFile(key, url) {
+      try {
+        const response = await fetch(url);
+        const arrayBuffer = await response.arrayBuffer();
+        audioBuffers[key] = await audioCtx.decodeAudioData(arrayBuffer);
+        
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffers[key];
+        source.loop = true;
+
+        const gainNode = audioCtx.createGain();
+        gainNode.gain.value = 0; // Inicia mudo
+
+        source.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        source.start(0);
+
+        audioSources[key] = source;
+        audioGains[key] = gainNode;
+      } catch (err) {
+        console.warn(`Não foi possível carregar o áudio "${url}". Verifique se o arquivo existe.`, err);
       }
-      return buffer;
     }
 
-    // SISTEMA DE ÁUDIO DE ZONAS COM CROSSFADE POSICIONAL
-    function initAudio() {
+    async function initAudio() {
       if (audioCtx) return;
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const noiseBuffer = createNoiseBuffer();
 
-      // ZONA A: Trânsito (Ruído grave modulado + filtro Lowpass)
-      const noiseA = audioCtx.createBufferSource();
-      noiseA.buffer = noiseBuffer; noiseA.loop = true;
-      const filterA = audioCtx.createBiquadFilter();
-      filterA.type = 'lowpass'; filterA.frequency.value = 160;
-      zoneGains.A = audioCtx.createGain(); zoneGains.A.gain.value = 0;
-      noiseA.connect(filterA); filterA.connect(zoneGains.A); zoneGains.A.connect(audioCtx.destination);
-      noiseA.start();
-
-      // ZONA B: ECA (Acorde ambiente musical)
-      const oscB1 = audioCtx.createOscillator();
-      const oscB2 = audioCtx.createOscillator();
-      oscB1.type = 'sine'; oscB1.frequency.value = 220; // A3
-      oscB2.type = 'triangle'; oscB2.frequency.value = 277.18; // C#4
-      const filterB = audioCtx.createBiquadFilter();
-      filterB.type = 'lowpass'; filterB.frequency.value = 400;
-      zoneGains.B = audioCtx.createGain(); zoneGains.B.gain.value = 0;
-      oscB1.connect(filterB); oscB2.connect(filterB);
-      filterB.connect(zoneGains.B); zoneGains.B.connect(audioCtx.destination);
-      oscB1.start(); oscB2.start();
-
-      // ZONA C: CRUSP (Murmúrio e vida urbana - Bandpass no ruído)
-      const noiseC = audioCtx.createBufferSource();
-      noiseC.buffer = noiseBuffer; noiseC.loop = true;
-      const filterC = audioCtx.createBiquadFilter();
-      filterC.type = 'bandpass'; filterC.frequency.value = 600; filterC.Q.value = 3;
-      zoneGains.C = audioCtx.createGain(); zoneGains.C.gain.value = 0;
-      noiseC.connect(filterC); filterC.connect(zoneGains.C); zoneGains.C.connect(audioCtx.destination);
-      noiseC.start();
-
-      // ZONA D: Reitoria (Vento encanado - Bandpass móvel)
-      const noiseD = audioCtx.createBufferSource();
-      noiseD.buffer = noiseBuffer; noiseD.loop = true;
-      const filterD = audioCtx.createBiquadFilter();
-      filterD.type = 'bandpass'; filterD.frequency.value = 350; filterD.Q.value = 2;
-      zoneGains.D = audioCtx.createGain(); zoneGains.D.gain.value = 0;
-      noiseD.connect(filterD); filterD.connect(zoneGains.D); zoneGains.D.connect(audioCtx.destination);
-      noiseD.start();
-
-      // ZONA E: Bandejão (Metal e canos de água - Filtro de alta ressonância)
-      const noiseE = audioCtx.createBufferSource();
-      noiseE.buffer = noiseBuffer; noiseE.loop = true;
-      const filterE = audioCtx.createBiquadFilter();
-      filterE.type = 'bandpass'; filterE.frequency.value = 1200; filterE.Q.value = 8;
-      zoneGains.E = audioCtx.createGain(); zoneGains.E.gain.value = 0;
-      noiseE.connect(filterE); filterE.connect(zoneGains.E); zoneGains.E.connect(audioCtx.destination);
-      noiseE.start();
-
-      // ZONA F: Subterrâneo Profundo (Zumbido Sub-grave 45Hz)
-      const oscF = audioCtx.createOscillator();
-      oscF.type = 'sawtooth'; oscF.frequency.value = 45;
-      const filterF = audioCtx.createBiquadFilter();
-      filterF.type = 'lowpass'; filterF.frequency.value = 90;
-      zoneGains.F = audioCtx.createGain(); zoneGains.F.gain.value = 0;
-      oscF.connect(filterF); filterF.connect(zoneGains.F); zoneGains.F.connect(audioCtx.destination);
-      oscF.start();
+      for (const [key, path] of Object.entries(AUDIO_FILES)) {
+        await loadAudioFile(key, path);
+      }
     }
 
-    // ATUALIZA VOLUME DAS ZONAS COM CROSSFADE COM BASE NA POSIÇÃO DO JOGADOR
+    // ATUALIZA VOLUME POSICIONAL
     function updateAudioPositional(r, c) {
       if (!audioCtx) return;
 
-      const maxDistance = 22; // Raio máximo de alcance do som de cada zona
+      const maxDistance = 20;
       const now = audioCtx.currentTime;
 
       let dominantZoneKey = 'D';
       let minDistance = Infinity;
 
+      // 1. Atualizar sons das Zonas A a F
       Object.keys(ZONES).forEach(key => {
         const zone = ZONES[key];
         const dist = Math.hypot(r - zone.centerR, c - zone.centerC);
@@ -453,12 +446,41 @@
           dominantZoneKey = key;
         }
 
-        // Cálculo suave do ganho (Inverso da distância)
         let volume = Math.max(0, 1 - (dist / maxDistance));
-        volume = Math.pow(volume, 2) * 0.25; // Curva atenuada para volume máximo confortável (0.25)
+        volume = Math.pow(volume, 2) * 0.4;
 
-        zoneGains[key].gain.setTargetAtTime(volume, now, 0.4);
+        if (audioGains[zone.audioKey]) {
+          audioGains[zone.audioKey].gain.setTargetAtTime(volume, now, 0.3);
+        }
       });
+
+      // 2. Som dos Quero-Queros (Limite máximo de 50% = 0.5)
+      let minQueroDist = Infinity;
+      QUERO_QUERO_SPOTS.forEach(spot => {
+        const d = Math.hypot(r - spot.r, c - spot.c);
+        if (d < minQueroDist) minQueroDist = d;
+      });
+
+      let queroVolume = Math.max(0, 1 - (minQueroDist / 12));
+      queroVolume = Math.pow(queroVolume, 2) * 0.5; // Limite em 50%
+
+      if (audioGains['queroQuero']) {
+        audioGains['queroQuero'].gain.setTargetAtTime(queroVolume, now, 0.2);
+      }
+
+      // 3. Som da Bateria Universitária (Limite máximo de 50% = 0.5)
+      let minBateriaDist = Infinity;
+      BATERIA_SPOTS.forEach(spot => {
+        const d = Math.hypot(r - spot.r, c - spot.c);
+        if (d < minBateriaDist) minBateriaDist = d;
+      });
+
+      let bateriaVolume = Math.max(0, 1 - (minBateriaDist / 12));
+      bateriaVolume = Math.pow(bateriaVolume, 2) * 0.5; // Limite em 50%
+
+      if (audioGains['bateria']) {
+        audioGains['bateria'].gain.setTargetAtTime(bateriaVolume, now, 0.2);
+      }
 
       document.getElementById('zoneDisplay').textContent = ZONES[dominantZoneKey].name;
     }
@@ -482,7 +504,7 @@
       filter.frequency.setValueAtTime(250 + Math.random() * 100, now);
 
       const gain = audioCtx.createGain();
-      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.setValueAtTime(0.15, now);
       gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
 
       noise.connect(filter);
@@ -734,7 +756,6 @@
 
       torchLight.position.set(playerPos.x, camera.position.y, playerPos.z);
 
-      // Calcular R e C atuais do jogador no labirinto para o áudio
       const currentC = Math.floor((playerPos.x / CELL_SIZE) + (GRID_COLS / 2));
       const currentR = Math.floor((playerPos.z / CELL_SIZE) + (GRID_ROWS / 2));
       updateAudioPositional(currentR, currentC);
@@ -797,10 +818,10 @@
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    document.getElementById('startBtn').addEventListener('click', () => {
+    document.getElementById('startBtn').addEventListener('click', async () => {
       document.getElementById('startScreen').style.display = 'none';
       document.getElementById('gameUI').style.display = 'flex';
-      initAudio();
+      await initAudio();
       init3D();
       animate();
       gameActive = true;
